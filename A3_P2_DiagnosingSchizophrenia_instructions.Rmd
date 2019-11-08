@@ -1,6 +1,6 @@
 ---
 title: "Assignment 3 - Part 2 - Diagnosing Schizophrenia from Voice"
-author: "Riccardo Fusaroli"
+author: "Aske Bredahl Nielsen"
 date: "October 17, 2017"
 output: html_document
 ---
@@ -41,367 +41,225 @@ N.N.B. you need to decide whether calculate performance on each single test fold
 N.N.N.B. Now you have two levels of structure: subject and study. Should this impact your cross-validation?
 N.N.N.N.B. A more advanced solution could rely on the tidymodels set of packages (warning: Time-consuming to learn as the documentation is sparse, but totally worth it)
 
-
-
 ```{r}
 # load packages
-pacman::p_load(pacman, tidyverse, tidymodels, groupdata2, yardstick, lme4, ModelMetrics, caret, cvms, e1071)
-
-
+pacman::p_load(pacman, tidyverse, tidymodels, groupdata2, yardstick, lme4, ModelMetrics, caret, cvms, e1071, MuMIn, ggplot2)
 
 # load data. Schizodata.csv = merged_data
-Schizodata <- read.csv("Merged__scaled_data.csv")
+Schizodata <- read.csv("schizo_data.csv")
 
+# inspect data
 summary(Schizodata)
-###
 
-# build a logistic regression to diagnosis with the best acoustic feature. Use the full data set. Next, calculate performance metrics.
-log_res_1 <- logistic_reg() %>% 
+# Our best acoustic feature + random effects on the full dataset
+log_res_1 <- lme4::glmer(Diagnosis.x ~ 1 + scaled_IQR + (1|ID) + (1|Study.x), data = Schizodata, family = binomial, REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )))
+summary(log_res_1)
+# This model predicts everyone to be D0. (see estimate and intercept).
+
+# Try without random effects (still on the full dataset)
+log_res_2 <- logistic_reg() %>% 
   set_mode("classification") %>% 
   set_engine("glm") %>% 
   fit(Diagnosis.x ~ scaled_IQR, data = Schizodata)
 
-# print assigned diagnosis as predicted by the model
-log_class_1 <- log_res_1 %>%
+log_class <- log_res_2 %>% 
   predict(new_data = Schizodata) %>% 
   pull(.pred_class)
 
-# print the probabilities of having D1 for each participants
-log_prop_1 <- log_res_1 %>%
+log_prob <- log_res_2 %>% 
   predict(new_data = Schizodata, type = "prob") %>% 
   pull(.pred_D1)
 
-# create a dataframe containing: true diagnosis, logclass and log probability (for D1)
-test_results <- 
-  Schizodata %>% 
+test_results <- Schizodata %>% 
   select(Diagnosis.x) %>% 
-  mutate(log_class_1) %>% 
-  mutate(log_prop_1)
+  mutate(log_class) %>% 
+  mutate(log_prob)
 
-# calculate perfomance metrics
-view(metrics(test_results, truth = Diagnosis.x, estimate = log_class_1))
-
-
-# create a confusion matrix
-yardstick::conf_mat(test_results, Diagnosis.x, log_class_1)
-
-# calculate positive predicted value 
-PPV <-  yardstick::ppv(test_results, Diagnosis.x, log_class_1, 0.52326)
-PPV
-# calculate negative predicted value
-NPV <- yardstick::npv(test_results, Diagnosis.x, log_class_1, 0.47)
-print(NPV)
-# ROC-curve visualization
-test_results %>%
-  roc_curve(truth = Diagnosis.x, log_prop_1) %>% 
-  autoplot()
+metrics <- metrics(test_results, truth = Diagnosis.x, estimate = log_class)
+metrics
 
 
+# which mixed effects model is the best? First, fold the data
+folds <- fold(Schizodata, 5, cat_col = "Diagnosis.x", id_col = "ID")
 
-###
+# try different mixed effects models
+model_0 <- cvms::cross_validate(folds, 
+  c("Diagnosis.x ~ 1 + (1|ID) + (1|Study.x)", 
+    "Diagnosis.x ~ scaled_IQR + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_IQR + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + scaled_IQR + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_IQR + scaled_speak_time + (1|ID) + (1|Study.x)"), 
+  family = "binomial", REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )) )
 
-summary(Schizodata)
+# extract balanced accuracy and formula
+tbl0 <- model_0[,c(1,28)]
+tbl0
 
-# partition data into training and test data
+
+# find the best models without random effects
+model_1 <- cvms::cross_validate(folds, 
+  c("Diagnosis.x ~ 1", 
+    "Diagnosis.x ~ scaled_IQR",
+    "Diagnosis.x ~ scaled_IQR + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time",
+    "Diagnosis.x ~ scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time + scaled_IQR + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_IQR + scaled_speak_time"), 
+  family = "binomial", REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )) )
+
+# extract balanced accuracy and formula
+tbl1 <- model_1[,c(1, 28)]
+tbl1
+
+
+# partition the dataset into training and test.
+# set seed for reproducability
 set.seed(1)
+
+# partition data 80/20 and make diagnosis groups balanced in the two sets
 df_list <- partition(Schizodata, p = 0.2, cat_col = "Diagnosis.x", id_col = "ID", list_out = T)
+
 # append test and training to different dataframes
 df_test <- df_list[[1]]
 df_train <- df_list[[2]]
-df_list
 
-# create folds
-folds <- fold(df_train, 5, cat_col = "Diagnosis.x", id_col = "ID")
-folds
+df_train <- fold(df_train, 5 , cat_col = "Diagnosis.x", id_col = "ID")
 
 
-#log_res_2 <- glm(Diagnosis.x~ IQR, family = "binomial", folds)
+# cross validate all the models on the training set to see which models should be used on the test set
+model_3 <- cvms::cross_validate(df_train, 
+  c("Diagnosis.x ~ 1 + (1|ID) + (1|Study.x)", 
+    "Diagnosis.x ~ scaled_IQR + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_IQR + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + scaled_IQR + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_speak_time + scaled_speech_rate + (1|ID) + (1|Study.x)",
+    "Diagnosis.x ~ scaled_IQR + scaled_speak_time + (1|ID) + (1|Study.x)"), 
+  family = "binomial", REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )) )
 
-log_res_2 <- logistic_reg() %>% 
-  set_mode("classification") %>% 
-  set_engine("glm") %>% 
-  fit(Diagnosis.x ~ scaled_IQR, data = folds)
+tbl3 <- model_3[, c(1,28)]
+tbl3
 
-cv1 <- cvms::cross_validate(folds, "Diagnosis.x ~ scaled_IQR", family = "binomial")
+# without random effects
+model_4 <- cvms::cross_validate(df_train, 
+  c("Diagnosis.x ~ 1", 
+    "Diagnosis.x ~ scaled_IQR",
+    "Diagnosis.x ~ scaled_IQR + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time",
+    "Diagnosis.x ~ scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time + scaled_IQR + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_speak_time + scaled_speech_rate",
+    "Diagnosis.x ~ scaled_IQR + scaled_speak_time"), 
+  family = "binomial", REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )) )
 
-
-#log_on_test <- glm(Diagnosis.x ~ IQR, family = "binomial", df_test)
-
-predict(log_res_2, df_test)
-
-### PERFORMANCE METRICS FOR TRAINING DATA
-
-# calculate performance metrics for how the model performs on the TRAINING set.
-# print assigned diagnosis as predicted by the model
-log_class_3 <- log_res_2 %>%
-  predict(new_data = folds) %>%
-  pull(.pred_class)
-
-
-# print the probabilities of having D1 for each participants
-log_prop_3 <- log_res_2 %>%
-  predict(new_data = folds, type = "prob") %>% 
-  pull(.pred_D1)
-
-
-# create dataframe
-test_results_3 <- 
-  df_train %>% 
-  select(Diagnosis.x) %>% 
-  mutate(log_class_3) %>% 
-  mutate(log_prop_3)
-
-# calculate perfomance metrics
-view(metrics(test_results_3, truth = Diagnosis.x, estimate = log_class_3))
-
-# create a confusion matrix
-yardstick::conf_mat(test_results_3, Diagnosis.x, log_class_3)
-
-# calculate positive predicted value 
-PPV3 <-  yardstick::ppv(test_results_3, Diagnosis.x, log_class_3, 0.52326)
-
-# calculate negative predicted value
-NPV3 <- yardstick::npv(test_results_3, Diagnosis.x, log_class_3, 0.47)
-
-# ROC-curve visualization
-test_results_3 %>%
-  roc_curve(truth = Diagnosis.x, log_prop_3) %>% 
-  autoplot()
+tbl4 <- model_4[,c(1,28)]
+tbl4
 
 
-### PERFORMANCE METRICS FOR TEST DATA
+# train the best model (with all 3 predictors) and test on test data
+log_res_5 <- glm(Diagnosis.x ~ scaled_IQR + scaled_speak_time + scaled_speech_rate, data = df_train, family = binomial)
 
-# calculate performance metrics for how the model performs on the test set.
-# print assigned diagnosis as predicted by the model
-log_class_2 <- log_res_2 %>%
-  predict(new_data = df_test) %>%
-  pull(.pred_class)
-
+log_class_5 <- log_res_5 %>%
+  predict(df_test, allow.new.levels = T)
 
 # print the probabilities of having D1 for each participants
-log_prop_2 <- log_res_2 %>%
-  predict(new_data = df_test, type = "prob") %>% 
-  pull(.pred_D1)
-
-
-# create dataframe
-test_results_2 <- 
-  df_test %>% 
-  select(Diagnosis.x) %>% 
-  mutate(log_class_2) %>% 
-  mutate(log_prop_2)
-
-# calculate perfomance metrics
-view(metrics(test_results_2, truth = Diagnosis.x, estimate = log_class_2))
-
-# create a confusion matrix
-yardstick::conf_mat(test_results_2, Diagnosis.x, log_class_2)
-
-# calculate positive predicted value 
-PPV2 <-  yardstick::ppv(test_results_2, Diagnosis.x, log_class_2, 0.52326)
-
-# calculate negative predicted value
-NPV2 <- yardstick::npv(test_results_2, Diagnosis.x, log_class_2, 0.47)
-
-# ROC-curve visualization
-test_results_2 %>%
-  roc_curve(truth = Diagnosis.x, log_prop_2) %>% 
-  autoplot()
-
-
-### Which combination of features has the best predictive power?
-
-cv_IQR <- cvms::cross_validate(folds, 
-  c("Diagnosis.x ~ scaled_IQR"),
-    family = "binomial")
-
-cv_speaktime <- cvms::cross_validate(folds, 
-  c("Diagnosis.x ~ scaled_IQR + scaled_speak_time"),
-    family = "binomial")
-
-cv_speechrate <- cvms::cross_validate(folds, 
-  c("Diagnosis.x ~ scaled_IQR + scaled_speech_rate"),
-    family = "binomial")
-
-cv_speechratetime <- cvms::cross_validate(folds, 
-  c("Diagnosis.x ~ scaled_speak_time + scaled_speech_rate"),
-    family = "binomial")
-
-cv_speechtimerateiqr <- cvms::cross_validate(folds, 
-  c("Diagnosis.x ~ scaled_IQR + scaled_speech_rate + scaled_speak_time"),
-    family = "binomial")
-
-
-# test speech_rate on the test data
-log_res_4 <- logistic_reg() %>% 
-  set_mode("classification") %>% 
-  set_engine("glm") %>% 
-  fit(Diagnosis.x ~ scaled_IQR + scaled_speak_time + scaled_speech_rate, data = folds)
-
-
-
-
-### PERFORMANCE METRICS FOR TEST DATA (iqr+speak_time)
-
-# calculate performance metrics for how the model performs on the TRAINING set.
-# print assigned diagnosis as predicted by the model
-log_class_4 <- log_res_4 %>%
-  predict(new_data = df_test) %>%
-  pull(.pred_class)
-
-
-# print the probabilities of having D1 for each participants
-log_prop_4 <- log_res_4 %>%
-  predict(new_data = df_test, type = "prob") %>% 
-  pull(.pred_D1)
-
-
-# create dataframe
-test_results_4 <- 
-  df_test %>% 
-  select(Diagnosis.x) %>% 
-  mutate(log_class_4) %>% 
-  mutate(log_prop_4)
-
-# calculate perfomance metrics
-view(metrics(test_results_4, truth = Diagnosis.x, estimate = log_class_4))
-
-# create a confusion matrix
-yardstick::conf_mat(test_results_3, Diagnosis.x, log_class_3)
-
-# calculate positive predicted value 
-PPV3 <-  yardstick::ppv(test_results_3, Diagnosis.x, log_class_3, 0.52326)
-
-# calculate negative predicted value
-NPV3 <- yardstick::npv(test_results_3, Diagnosis.x, log_class_3, 0.47)
-
-# ROC-curve visualization
-test_results_3 %>%
-  roc_curve(truth = Diagnosis.x, log_prop_3) %>% 
-  autoplot()
-
-
-
-
-
-
-
-
-
-
-
-#######
-
-# create recipe. N.B. review the preprocessing steps
-rec <- df_train %>% recipe(Diagnosis.x ~ IQR) %>% # predict diagnosis from all variables
-  step_center(all_numeric()) %>% # normalize data to have a mean of 0
-  step_scale(all_numeric()) %>% # scale so standard deviation is 1
-  step_corr(all_numeric()) %>% # step_corr removes potential correlated variables
-  prep(training = df_train) # creates a "recipe element" with training data
-
-
-# extract the new scaled variables from rec
-train_baked <- juice(rec) 
-train_baked
-
-# apply the training recipe to the test set
-test_baked <- rec %>% bake(df_test)
-#Even though the training set is part of the recipe, this does not affect baking the test set. The framework knows that it is dealing with a training and test set, and juicing() the recipe returns the training data set because this is specified in the end of the recipe (the prep(training = df_train)). If we insted deleted this line from the recipe and insted baked() the training set the same way we bake the test set, the result would be the same. 
-
-# Create the logistic model and predicting diagnosis from IQR
-log_res_2 <- logistic_reg() %>% 
-  set_mode("classification") %>% 
-  set_engine("glm") %>% 
-  fit(Diagnosis.x ~ IQR, data = train_baked)
-
-log_res_2
-
-# print assigned diagnosis as predicted by the model
-log_class_2 <- log_res_2 %>%
-  predict(new_data = test_baked) %>% 
-  pull(.pred_class)
-
-
-# print the probabilities of having D1 for each participants
-log_prop_2 <- log_res_2 %>%
-  predict(new_data = test_baked, type = "prob") %>% 
-  pull(.pred_D1)
+log_prop_5 <- log_res_5 %>%
+  predict(df_test, type = "response", allow.new.levels = T)
 
 # create a dataframe containing: true diagnosis, logclass and log probability (for D1)
-test_results_2 <- 
-  test_baked %>% 
+test_results5 <- 
+  df_test %>% 
   select(Diagnosis.x) %>% 
-  mutate(log_class_2) %>% 
-  mutate(log_prop_2)
+  mutate(log_class_5) %>% 
+  mutate(log_prop_5) %>% 
+  mutate(class = ifelse(log_class_5 < 0, "D0", "D1"))
 
-test_results_2
+test_results5$class <- as.factor(test_results5$class)
 
+# create confusion matrix for log_res_5
+confmat5 <- caret::confusionMatrix(test_results5$class, test_results5$Diagnosis.x, positive = "D0")
+confmat5
 
-# get accuracy (and kappa if comparing several models)
-metrics(test_results_2, truth = Diagnosis.x, estimate = log_class_2)
-
-
-# create a ROC curve
-test_results_2 %>% 
-roc_curve(truth = Diagnosis.x, estimate = log_prop_2) %>% 
+# Visualize ROC curve for log_res_5
+ROC_5 <- test_results5 %>%
+  roc_curve(truth = Diagnosis.x, log_prop_5) %>% 
   autoplot()
 
 
 
+# train model with only IQR+random effects and test on test data
+log_res_6 <- glmer(Diagnosis.x ~ 1 + scaled_IQR + (1|ID) + (1|Study.x), data = df_train, family = binomial, REML = F,  control = glmerControl(
+  optimizer = "nloptwrap",
+  calc.derivs = F,
+  optCtrl = list(
+    ftol_abs = 1e-10,
+    xtol_abs = 1e-10,
+    maxeval = 10000
+  )))
 
 
+log_class_6 <- log_res_6 %>%
+  predict(df_test, allow.new.levels = T)
+
+# print the probabilities of having D1 for each participants
+log_prop_6 <- log_res_6 %>%
+  predict(df_test, type = "response", allow.new.levels = T)
 
 
+# create a dataframe containing: true diagnosis, logclass and log probability (for D1)
+test_results6 <- 
+  df_test %>% 
+  select(Diagnosis.x) %>% 
+  mutate(log_class_6) %>% 
+  mutate(log_prop_6) %>% 
+  mutate(class = ifelse(log_class_6 < 0, "D0", "D1"))
+test_results6$class <- as.factor(test_results6$class)
 
-#######
-
-# time for multiple cross validation
-## (use jacobs function for estimating the optimal amount of folds)
-### V: number of partitions. strata: provides balanced folds in terms of diagnosis
-folds <- vfold_cv(df_train, v = 5, repeats = 1, strata = Diagnosis.x)
-# vfold_cv creates a dataframe containing a column called "splits". The values in this column are called "split objects". The individual cells does not contain single values, but whole data frames (look at the size of "folds").
-
-
-folds <- folds %>% # use the previously created folds
-  mutate(recipes = splits %>% # the column "recipes" now contains the split objects. (No idea why is is necesarry)
-  map(prepper, recipe = rec), # map returns a list with elements that are run through a given function, prepper handles the "split objects" in folds
-  train_data = splits %>% 
-  map(training)) # return a list of the training data (see recipe)
-
-head(folds$recipes)
-
-
-# now we train the folds with a logistic regression is before
-log_fit2 <- 
-  logistic_reg() %>%
-  set_mode("classification") %>% 
-  set_engine("glm") 
-
-folds <- folds %>%  
-  mutate(log_fits = pmap(list(recipes, train_data), # pmap creates a list of multiple inputs. This list contains the split objects looped over the recipe and the model.
-  ~ fit(log_fit2, formula(.x), data = bake(object = .x, new_data = .y))))
-
-
-view(folds)
-p_load(rsample)
-
-splits <- folds$splits
-
-predicted_log <- function(split, recipe, model) {
-  baked_test <- bake(rec, new_data = testing(folds)) 
-  tibble(
-    actual = baked_test$Diagnosis.x,
-    predicted = predict(log_fit2, baked_test) %>% pull(.pred_class),
-    prob_diagnosis = predict(log_fit2, baked_test, type = "prob") %>% pull(.pred_Diagnosis.x)
-  )
-}
-
-
-
-folds <- folds %>% 
-  mutate(pred = pmap(list(baked_test$splits, baked_test$recipes, baked_test$log_fits), predicted_log))
-
-  
+# create confusion matrix for log_res_6
+confmat6 <- caret::confusionMatrix(test_results6$class, test_results6$Diagnosis.x, positive = "D0")
+# Visualize ROC curve for log_res_6
+ROC_6 <- test_results6 %>%
+  roc_curve(truth = Diagnosis.x, log_prop_6) %>% 
+  autoplot()
 
 ```
-
